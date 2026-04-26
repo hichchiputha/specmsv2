@@ -358,7 +358,15 @@ ipcMain.handle('crypto:clear-lesson', () => {
 
 ipcMain.handle('video:setup-interceptor', (event, { accessToken, lessonId }) => {
   try {
-    const filter = { urls: ['https://www.youtube.com/*', 'https://www.googleapis.com/*', 'https://rr*.googlevideo.com/*'] };
+    // NEW CODE (Fixed wildcard)
+    const filter = { 
+      urls: [
+        'https://www.youtube.com/*', 
+        'https://www.googleapis.com/*', 
+        'https://*.googlevideo.com/*'  // Changed rr*.googlevideo.com to *.googlevideo.com
+      ] 
+    };
+    
     session.defaultSession.webRequest.onBeforeSendHeaders(filter, (details, callback) => {
       const headers = { ...details.requestHeaders };
       if (accessToken) {
