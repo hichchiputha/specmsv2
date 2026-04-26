@@ -4,10 +4,10 @@
 const path = require('path');
 const fs = require('fs');
 
-// Load env from electron-app root
-const envPath = path.join(__dirname, '../../..', '.env');
+// Load env from project root (one level above electron-app/)
+const envPath = path.join(__dirname, '../../../.env');
 if (fs.existsSync(envPath)) {
-  require('fs').readFileSync(envPath, 'utf8').split('\n').forEach(line => {
+  fs.readFileSync(envPath, 'utf8').split('\n').forEach(line => {
     const [key, ...vals] = line.split('=');
     if (key && vals.length) process.env[key.trim()] = vals.join('=').trim();
   });
@@ -19,8 +19,12 @@ const os = require('os');
 
 // electron-log must be required before autoUpdater
 const log = require('electron-log');
-log.transports.file.level = 'info';
+log.transports.file.level = 'debug';
 log.transports.console.level = 'debug';
+log.info('=== LMS Electron App Starting ===');
+log.info('Node:', process.versions.node);
+log.info('Chrome:', process.versions.chrome);
+log.info('Electron:', process.versions.electron);
 
 const { autoUpdater } = require('electron-updater');
 autoUpdater.logger = log;
@@ -35,6 +39,10 @@ const VIDEO_ENCRYPTION_KEY = process.env.VIDEO_ENCRYPTION_KEY || 'lms-video-encr
 const VIDEO_MASTER_KEY = process.env.VIDEO_MASTER_KEY || 'lms-master-video-key-32bytessss!';
 
 const APP_VERSION = app.getVersion();
+
+log.info('IS_DEV:', IS_DEV);
+log.info('API_BASE:', API_BASE);
+log.info('__dirname:', __dirname);
 
 // ── State ──────────────────────────────────────────────────────────────────
 let mainWindow = null;
@@ -157,10 +165,50 @@ function buildMenu() {
 
 // ── Window ─────────────────────────────────────────────────────────────────
 async function createWindow() {
+  log.info('createWindow() called');
+
   // Resolve renderer path
+  // __dirname is electron-app/src/main/
+  // renderer build is at electron-app/src/renderer/build/
   const rendererFile = IS_DEV
     ? null
-    : path.join(__dirname, '../../renderer/build/index.html');
+    : path.join(__dirname, '../renderer/build/index.html');
+
+  log.info('IS_DEV:', IS_DEV);
+  log.info('rendererFile:', rendererFile);
+
+  if (!IS_DEV) {
+    // Verify the file exists before trying to load it
+    if (!fs.existsSync(rendererFile)) {
+      log.error('Renderer build file not found at:', rendererFile);
+      log.error('Please run "npm run build:renderer" first to build the React app.');
+
+      // Show an error window instead of silently crashing
+      mainWindow = new BrowserWindow({
+        width: 600,
+        height: 400,
+        webPreferences: {
+          contextIsolation: true,
+          nodeIntegration: false,
+        },
+      });
+
+      await mainWindow.loadURL(`data:text/html,
+        <html>
+          <head><title>Build Error</title></head>
+          <body style="font-family:sans-serif;padding:20px;background:#1a1a2e;color:#eee;">
+            <h2>⚠️ Renderer Not Built</h2>
+            <p>The React app has not been built yet.</p>
+            <p>Please run:</p>
+            <pre style="background:#333;padding:10px;border-radius:5px;">cd electron-app/src/renderer && npm install && npm run build</pre>
+            <p>Expected path: <code>${rendererFile}</code></p>
+          </body>
+        </html>
+      `);
+      return;
+    }
+    log.info('Renderer file exists ✓');
+  }
 
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -171,7 +219,7 @@ async function createWindow() {
     backgroundColor: '#0f0f1a',
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
-      preload: path.join(__dirname, '../../preload/preload.js'),
+      preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -180,19 +228,56 @@ async function createWindow() {
     },
   });
 
-  if (IS_DEV) {
-    await mainWindow.loadURL('http://localhost:3000');
-    mainWindow.webContents.openDevTools();
-  } else {
-    await mainWindow.loadFile(rendererFile);
+  // Handle renderer process crashes
+  mainWindow.webContents.on('render-process-gone', (event, details) => {
+    log.error('Renderer process gone:', details);
+  });
+
+  mainWindow.webContents.on('crashed', (event) => {
+    log.error('Renderer crashed');
+  });
+
+  mainWindow.webContents.on('unresponsive', () => {
+    log.warn('Renderer unresponsive');
+  });
+
+  try {
+    if (IS_DEV) {
+      log.info('Loading dev URL: http://localhost:3000');
+      await mainWindow.loadURL('http://localhost:3000');
+      mainWindow.webContents.openDevTools();
+    } else {
+      log.info('Loading file:', rendererFile);
+      await mainWindow.loadFile(rendererFile);
+    }
+    log.info('Window loaded successfully');
+  } catch (err) {
+    log.error('Failed to load window:', err.message);
+
+    // Show error in the window
+    await mainWindow.loadURL(`data:text/html,
+      <html>
+        <head><title>Error</title></head>
+        <body style="font-family:sans-serif;padding:20px;background:#1a1a2e;color:#eee;">
+          <h2>⚠️ Failed to Load App</h2>
+          <pre style="background:#333;padding:10px;border-radius:5px;white-space:pre-wrap;">${err.message}</pre>
+          <p>Check logs at: ${log.transports.file.getFile().path}</p>
+        </body>
+      </html>
+    `);
+    return;
   }
 
   mainWindow.once('ready-to-show', () => {
+    log.info('ready-to-show');
     mainWindow.show();
     if (!IS_DEV) mainWindow.maximize();
   });
 
-  mainWindow.on('closed', () => { mainWindow = null; });
+  mainWindow.on('closed', () => {
+    log.info('Window closed');
+    mainWindow = null;
+  });
 
   setupSecurity(mainWindow);
   buildMenu();
@@ -330,9 +415,31 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
+app.on('ready', () => {
+  log.info('App ready event fired');
+});
+
+app.on('will-quit', () => {
+  log.info('App quitting');
+});
+
+app.on('quit', () => {
+  log.info('App quit event fired');
+});
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+  log.error('UNCAUGHT EXCEPTION:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  log.error('UNHANDLED REJECTION:', reason);
+});
+
 // Single instance lock
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
+  log.info('Second instance detected, quitting');
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -341,9 +448,19 @@ if (!gotLock) {
       mainWindow.focus();
     }
   });
-  app.whenReady().then(createWindow).catch(err => {
-    log.error('Failed to create window:', err);
-    app.quit();
+
+  app.whenReady().then(async () => {
+    log.info('app.whenReady() resolved');
+    try {
+      await createWindow();
+    } catch (err) {
+      log.error('Failed to create window:', err);
+      // Don't quit immediately - show the error window
+    }
+  }).catch(err => {
+    log.error('Fatal error during app startup:', err);
+    // Give user a moment to see logs before quitting
+    setTimeout(() => app.quit(), 2000);
   });
 }
 
